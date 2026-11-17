@@ -48,14 +48,15 @@ It also introduces an upload-based prediction workflow that allows users to subm
 
 | Feature | Description |
 |---|---|
-| User Authentication | Account registration and login with bcrypt password hashing. |
-| Home Dashboard | Displays application, model, dataset, and MongoDB status. |
-| Engine Prediction | Estimates RUL using the latest processed record of a selected test engine. |
-| CSV Upload and Instant Prediction | Allows users to upload new raw engine sensor data and generate RUL predictions using the existing trained model. |
+| User Authentication | Optional registration and login with bcrypt hashing; disabled by default and configurable with `AUTH_ENABLED`. |
+| Home Dashboard | Displays actual model predictions, equipment health distribution, saved evaluation metrics, and MongoDB status. |
+| Engine Prediction | Predicts every row in an existing processed CSV selected from `data/`. |
+| CSV Upload and Instant Prediction | Validates new raw engine sensor data and generates predictions for every uploaded record with the existing trained model. |
 | CSV Data Validation | Checks uploaded file structure, required columns, missing values, and invalid data. |
 | Dataset Preview | Displays uploaded CSV records before prediction. |
 | Batch Engine Prediction | Generates predictions for multiple engines contained in an uploaded CSV file. |
 | Prediction Download | Allows users to download prediction results as a CSV file. |
+| Prediction History | Stores per-user prediction metadata; small reports are retained only when under 256 KiB. |
 | Sensor Trend Analysis | Displays historical sensor trends for a selected engine and sensor channel. |
 | Simulated Monitoring | Replays engine records cycle by cycle and generates predictions for selected records. |
 | Model Performance | Presents saved evaluation metrics, dataset summaries, and model visualizations. |
@@ -87,7 +88,7 @@ These categories are application-defined indicators and should be treated as dec
 | Model Storage and Loading | Joblib |
 | Database | MongoDB Atlas |
 | Database Connectivity | PyMongo |
-| Authentication | Passlib, bcrypt |
+| Authentication | bcrypt |
 | Configuration | python-dotenv |
 | Model Comparison | XGBoost |
 
@@ -97,7 +98,7 @@ These categories are application-defined indicators and should be treated as dec
 
 The final application follows a direct Python-based architecture. Streamlit communicates with reusable Python services and modules, which access the saved machine learning model and processed dataset.
 
-MongoDB Atlas is used for application account storage.
+MongoDB Atlas is used for application accounts and optional per-user prediction history.
 
 ```mermaid
 flowchart TD
@@ -134,8 +135,8 @@ The Streamlit application directly uses Python modules. A separate REST API back
 1. **Dataset Preparation:** Raw NASA FD001 training, testing, and RUL files are processed to generate the required features.
 2. **Model Development:** A trained Random Forest model and its feature-column configuration are saved as model artifacts.
 3. **User Authentication:** Users register or log in through the Streamlit application. Account information is accessed through MongoDB Atlas.
-4. **Engine Selection:** A user selects an engine from the available processed test data.
-5. **RUL Prediction:** The prediction service selects the appropriate processed record, arranges the input features in the saved model-column order, and generates an RUL estimate.
+4. **Dataset Selection:** A user selects a processed CSV discovered under `data/`.
+5. **RUL Prediction:** The prediction service validates model features, arranges them in the saved model-column order, and predicts every input row.
 6. **Health Classification:** The predicted RUL is mapped to an application-defined health category.
 7. **Monitoring Simulation:** Users can replay historical engine records and view predictions for selected cycles.
 
@@ -146,10 +147,10 @@ The Streamlit application directly uses Python modules. A separate REST API back
 3. **Data Validation:** The system checks the expected C-MAPSS columns, data types, missing values, and valid engine-cycle records.
 4. **Feature Engineering:** The uploaded raw sensor data is processed using the existing feature engineering functions.
 5. **Feature Alignment:** The generated features are arranged according to the saved model feature-column configuration.
-6. **Instant Prediction:** The existing trained Random Forest model generates predictions for the latest available cycle of each engine.
+6. **Instant Prediction:** The existing trained Random Forest model generates predictions for every validated input record.
 7. **Health Classification:** Each predicted RUL value is mapped to a health category.
-8. **Result Display:** The application displays engine IDs, predicted RUL values, and health status.
-9. **CSV Download:** Users can download the generated prediction results.
+8. **Result Display:** The application displays the latest record per engine as a summary and retains the complete per-record prediction table.
+9. **CSV Download:** Users can download all original CSV records with prediction, status, risk, source, and UTC timestamp columns.
 
 The uploaded CSV workflow uses the existing trained model. It does not retrain the model during file upload or prediction.
 
@@ -231,8 +232,8 @@ After upload, the application:
 4. Reuses the existing rolling-feature and change-feature calculations.
 5. Generates the required 64 model input features.
 6. Aligns the features with the saved `feature_columns.pkl` configuration.
-7. Selects the latest available record for each engine.
-8. Generates predictions using the existing Random Forest model.
+7. Generates predictions for every uploaded record using the exact saved feature order.
+8. Adds the prediction, health, risk, source, and UTC timestamp to a complete row-preserving report.
 
 ### Prediction Results
 
@@ -278,8 +279,8 @@ Both artifacts are loaded using Joblib and cached within the Streamlit applicati
 
 1. The user selects a test engine or uploads new sensor data.
 2. The application retrieves the relevant processed or uploaded engine records.
-3. For the existing engine prediction page, the latest available processed record is selected.
-4. For uploaded CSV data, the latest available cycle of each engine is selected after validation and feature engineering.
+3. Processed data and uploaded raw records use their corresponding validation and feature-engineering paths.
+4. The model generates an estimate for every record; the UI summarizes the latest cycle per engine without dropping rows from the report.
 5. Input features are arranged according to the saved feature-column configuration.
 6. The trained Random Forest model generates an RUL estimate.
 7. The application clamps negative predictions to zero and displays the result in operating cycles.
@@ -329,14 +330,15 @@ The `outputs/charts/` directory includes:
 
 | Module | Functionality |
 |---|---|
-| Home Dashboard | Displays MongoDB status, model availability, test-engine count, and saved Random Forest metrics. |
-| Engine Prediction | Selects a test engine, generates an RUL prediction, and displays historical sensor trends. |
-| CSV Upload Prediction | Accepts new raw engine sensor CSV files, validates them, generates RUL predictions, and provides downloadable results. |
+| Home Dashboard | Runs the saved model against the processed test dataset and displays actual record, equipment, RUL, health, and saved metric analytics. |
+| Engine Prediction | Selects a processed CSV from `data/` or uploads a new raw sensor CSV; predicts every record and provides sensor trends and downloadable reports. |
+| CSV Upload Prediction | Accepts C-MAPSS raw sensor CSV files, validates them, generates one prediction per input record, and provides a downloadable report. |
+| Prediction History | Shows prediction metadata only for the signed-in user and offers saved reports only when they fit the configured storage limit. |
 | Model Performance | Displays processed dataset summaries, saved evaluation results, and visualizations. |
 | Simulated Engine Monitoring | Replays selected engine test records and generates predictions for selected cycles. |
 | Authentication Service | Handles registration, login, bcrypt password hashing, and account lockout after three failed login attempts. |
-| Database Service | Connects to MongoDB Atlas and provides access to the users collection. |
-| ML Service | Loads model artifacts and processed test data, validates uploaded sensor data, prepares prediction inputs, and generates RUL estimates. |
+| Database Service | Reads local environment variables or Streamlit secrets, pools MongoDB connections, and isolates history by user ID. |
+| ML Service | Loads model artifacts, discovers existing data CSVs, validates both processed and uploaded data, and generates row-preserving RUL estimates. |
 
 ### Additional Power BI Report
 
@@ -357,12 +359,16 @@ MongoDB Atlas is used as the application's database for user account management.
 The database service:
 
 - Connects to MongoDB Atlas using PyMongo.
-- Reads connection configuration from the root `.env` file.
+- Reads connection configuration from local environment variables or Streamlit secrets.
 - Uses the configured database name.
 - Verifies database connectivity using a ping.
 - Provides access to the `users` collection.
+- Saves prediction metadata in a `prediction_history` collection, filtered by signed-in MongoDB user ID.
+- Stores a downloadable report only when its UTF-8 CSV is no larger than 256 KiB. Larger reports remain downloadable immediately but are not copied into MongoDB.
 
 The authentication service uses the database for account registration and login. Passwords are stored as bcrypt hashes rather than plaintext passwords.
+
+Authentication is disabled by default (`AUTH_ENABLED=false`). Set it to `true` in the local `.env` only for local login testing. Keep it false in Streamlit Cloud until the instructor confirms that login may be deployed. Existing user records and indexes are reused; the app does not create, drop, or alter user indexes.
 
 A separate migration utility is available at:
 
@@ -425,15 +431,24 @@ Predictive-Maintenance-ML/
 │   │   └── realtime_monitoring.py
 │   │
 │   ├── services/
+│   │   ├── __init__.py
 │   │   ├── authentication.py
 │   │   ├── database.py
 │   │   └── ml_service.py
 │   │
+│   ├── __init__.py
 │   └── app.py
 │
+├── .streamlit/
+│   ├── config.toml
+│   └── secrets.toml.example
+├── tests/
+├── .env.example
 ├── .gitattributes
 ├── .gitignore
-└── requirements.txt
+├── requirements.txt
+├── requirements-dev.txt
+└── pytest.ini
 ```
 
 ## 15. Installation and Setup
@@ -479,26 +494,28 @@ python -m venv .venv
 
 ```powershell
 python -m pip install -r requirements.txt
+python -m pip check
 ```
 
 ### Step 5: Configure MongoDB Atlas
 
-Create a `.env` file in the root project directory.
+Copy `.env.example` to `.env` in the project root and fill in the existing Atlas connection information locally:
 
 Add your own MongoDB Atlas configuration:
 
 ```env
-MONGODB_URI=your_mongodb_connection_string
-MONGODB_DATABASE=your_database_name
+AUTH_ENABLED=true
+MONGODB_URI=your_existing_mongodb_connection_string
+MONGODB_DATABASE=your_existing_database_name
 ```
 
-Replace the placeholder values with your actual configuration.
+Set `AUTH_ENABLED=true` only for local login testing. Set it back to `false` for public use.
 
 **Security reminder:** Never upload your `.env` file, database credentials, passwords, or connection strings to GitHub.
 
 ## 16. Running the Application
 
-After installing dependencies and configuring MongoDB Atlas, run the following command from the project root:
+From the project root, run:
 
 ```powershell
 python -m streamlit run streamlit_app/app.py
@@ -514,7 +531,45 @@ http://localhost:8501
 
 The application loads the existing trained model, feature configuration, and processed dataset. Model training is not performed when the application starts.
 
-## 17. Limitations
+### Local test commands
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pip check
+python -m pytest -q
+python -m streamlit run streamlit_app/app.py
+```
+
+In the Engine Prediction page, check the existing processed dataset mode and upload a raw C-MAPSS CSV with the 26 required columns. Reports preserve each input row and can be opened in Excel. The realtime page replays saved dataset records; it is not a sensor feed.
+
+## 17. Streamlit Community Cloud Deployment
+
+Do not deploy login-enabled code or set `AUTH_ENABLED=true` in cloud secrets until the instructor confirms the restriction has changed. No deployment or Git push is performed automatically.
+
+1. Push only reviewed and approved changes to the GitHub `main` branch. The model and feature files are Git LFS tracked; verify the deployed checkout contains the real artifacts rather than short LFS pointer text.
+2. Open Streamlit Community Cloud and select **Create app**.
+3. Choose repository `Shibani-09/-Predictive-Maintenance-ML`, branch `main`, and main file path `streamlit_app/app.py`.
+4. Choose Python **3.13** in the deployment's advanced settings to match the project's tested Python major/minor version.
+5. In **Advanced settings → Secrets**, add the existing MongoDB URI and database name using TOML keys. Keep `AUTH_ENABLED = false` until deployment of authentication is authorized:
+
+   ```toml
+   AUTH_ENABLED = false
+   MONGODB_URI = "your existing Atlas connection string"
+   MONGODB_DATABASE = "your existing database name"
+   ```
+
+   Never paste secrets into source files, commits, issues, or chat messages. The committed `.streamlit/secrets.toml.example` contains placeholders only.
+6. In Atlas Network Access, allow only the current, trusted Streamlit egress addresses or a controlled network path. Do not expose the database to all IP addresses as a convenience.
+7. Deploy, inspect the app's build and runtime logs, then test the dashboard, both CSV modes, health summary, and download button. Test login and history only after authorization and with a non-production test account.
+8. For future updates, review, stage, commit, and push approved source changes to `main`; Community Cloud rebuilds from that branch. Inspect logs after each rebuild.
+
+### Windows Application Control note
+
+The project's Python 3.13.14 64-bit environment and pinned packages pass `pip check`. The official PyArrow CPython 3.13 Windows wheel is available, and the downloaded PyArrow 26.0.1 wheel matches the SHA-256 published by PyPI. Code Integrity events 3077/3033 block `C:\Projects\Predictive-Maintenance-ML\.venv\Lib\site-packages\pyarrow\_compute.cp313-win_amd64.pyd` under Enterprise policy `0283ac0f-fff1-49ae-ada1-8a933130cad6`; AppLocker has no matching event. The extension SHA-256 is `36C0459EDE8924B4FB30D545A160A3F0E839FCA1253902F4A34C6F604B4F8325`; the official wheel SHA-256 is `8196f36a2f4cb8d2d6ef3651941b80e5ccf125d7653657d99af5bb298e7a7026`.
+
+The same Enterprise policy also blocks the training dependency `C:\Projects\Predictive-Maintenance-ML\.venv\Lib\site-packages\xgboost\lib\xgboost.dll` (events 3077/3033, SHA-256 `29CDFB42C4365E1C731F1F5916210AB8642C1A117FD74D183DDAB2D5F4C214BC`). The Microsoft Visual C++ 14.x runtime (14.50.35719.00) and `vcomp140.dll` are present, so the recorded failures point to code-integrity policy, not missing runtimes or 32-bit Python. Both native files are not individually Authenticode-signed. Do not disable or bypass the policy. Ask the authorized IT/security administrator to review the events and approve the trusted package files through the organization's normal signing/allow-list process. Until approved, Pandas imports, full ML tests, XGBoost imports, and Streamlit page execution cannot be verified on this Windows machine.
+
+## 18. Limitations
 
 - The monitoring module replays historical FD001 test records rather than receiving live industrial sensor data.
 - CSV upload supports the specified raw C-MAPSS-format sensor data, not arbitrary CSV formats.
@@ -526,7 +581,7 @@ The application loads the existing trained model, feature configuration, and pro
 - MongoDB Atlas connectivity is required for database-dependent authentication functionality.
 - RUL estimates and health classifications are decision-support indicators and should not replace qualified maintenance decisions.
 
-## 18. Future Scope
+## 19. Future Scope
 
 Potential improvements for future development include:
 
@@ -540,11 +595,11 @@ Potential improvements for future development include:
 
 These are proposed future improvements and are not represented as currently implemented features.
 
-## 19. Project Contributors
+## 20. Project Contributors
 
 This project was developed collaboratively as an academic group project. The work involved project planning, dataset preparation, machine learning development, application implementation, database integration, testing, and documentation.
 
-## 20. Acknowledgements
+## 21. Acknowledgements
 
 - **NASA Prognostics Center of Excellence:** For providing the C-MAPSS turbofan engine degradation dataset.
 - **Python Open-Source Community:** For the libraries and tools used in data processing, machine learning, visualization, and application development.

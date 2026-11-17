@@ -1,7 +1,6 @@
 
 from io import BytesIO
 from functools import lru_cache
-import math
 from pathlib import Path
 
 import joblib
@@ -17,6 +16,8 @@ from src.feature_engineering import add_change_features, add_rolling_features
 # --------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+DATA_DIRECTORY = PROJECT_ROOT / "data"
 
 MODEL_PATH = PROJECT_ROOT / "models" / "random_forest_rul_model.pkl"
 
@@ -105,6 +106,112 @@ def load_test_dataset():
         )
 
     return df
+
+
+def list_existing_datasets() -> list[str]:
+    """Return CSV datasets under data/, using paths relative to that directory."""
+
+    if not DATA_DIRECTORY.is_dir():
+        raise FileNotFoundError(f"Dataset directory not found: {DATA_DIRECTORY}")
+
+    return sorted(
+        path.relative_to(DATA_DIRECTORY).as_posix()
+        for path in DATA_DIRECTORY.rglob("*.csv")
+        if path.is_file()
+    )
+
+
+def load_existing_dataset(dataset_name: str) -> pd.DataFrame:
+    """Load a project CSV without allowing paths outside data/."""
+
+    data_root = DATA_DIRECTORY.resolve()
+    path = (data_root / dataset_name).resolve()
+    if path.suffix.lower() != ".csv" or data_root not in path.parents:
+        raise ValueError("Select a CSV dataset inside the project data directory.")
+    if not path.is_file():
+        raise FileNotFoundError(f"Dataset file not found: {dataset_name}")
+
+    try:
+        dataframe = pd.read_csv(path)
+    except (OSError, pd.errors.ParserError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Could not read dataset {dataset_name}: {exc}") from exc
+
+    return dataframe
+
+
+def validate_processed_dataset(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Validate processed model inputs without imputing or fabricating values."""
+
+    if dataframe.empty:
+        raise ValueError("The dataset contains no records.")
+
+    required_columns = list(
+        dict.fromkeys(["engine_id", "cycle", *load_feature_columns()])
+    )
+    missing_columns = [
+        column for column in required_columns if column not in dataframe.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "The processed dataset is missing required columns: "
+            + ", ".join(missing_columns)
+            + "."
+        )
+
+    validated = dataframe.copy()
+    invalid_columns = []
+    for column in dict.fromkeys(required_columns):
+        converted = pd.to_numeric(validated[column], errors="coerce")
+        numeric_values = converted.to_numpy(dtype=float, na_value=np.nan)
+        invalid_mask = converted.isna() | ~np.isfinite(numeric_values)
+        if invalid_mask.any():
+            invalid_columns.append(f"{column} ({int(invalid_mask.sum())} invalid)")
+        else:
+            validated[column] = converted
+
+    if invalid_columns:
+        raise ValueError(
+            "Required dataset columns must contain finite numeric values: "
+            + ", ".join(invalid_columns)
+            + "."
+        )
+
+    for column in ("engine_id", "cycle"):
+        values = validated[column].to_numpy(dtype=float)
+        if ((values <= 0) | (values % 1 != 0)).any():
+            raise ValueError(
+                f"The {column} column must contain positive whole numbers."
+            )
+
+    return validated
+
+
+def predict_existing_dataset(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Predict every processed record, preserving all input columns."""
+
+    validated = validate_processed_dataset(dataframe)
+    if "predicted_rul" in validated.columns:
+        raise ValueError(
+            "The input already contains a predicted_rul column; rename it "
+            "before running inference to preserve the original records."
+        )
+    feature_columns = load_feature_columns()
+    model = load_model()
+    if getattr(model, "n_features_in_", len(feature_columns)) != len(feature_columns):
+        raise ValueError(
+            "The saved model input count does not match feature_columns.pkl."
+        )
+
+    predictions = np.asarray(
+        model.predict(validated.loc[:, feature_columns]), dtype=float
+    )
+
+    if predictions.shape != (len(validated),) or not np.isfinite(predictions).all():
+        raise ValueError("The model returned invalid RUL predictions.")
+
+    results = validated.copy()
+    results["predicted_rul"] = np.maximum(0.0, predictions)
+    return results
 
 
 # --------------------------------------------------
@@ -243,6 +350,13 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
     if dataframe.empty:
         raise ValueError("The CSV contains no data rows.")
 
+    def record_numbers(mask: pd.Series | np.ndarray) -> str:
+        positions = np.flatnonzero(np.asarray(mask, dtype=bool)) + 1
+        shown = ", ".join(str(position) for position in positions[:20])
+        if len(positions) > 20:
+            shown += f", and {len(positions) - 20} more"
+        return shown
+
     expected_columns = list(COLUMNS)
     missing_columns = [
         column for column in expected_columns if column not in dataframe.columns
@@ -262,7 +376,7 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
             "The CSV must use the raw C-MAPSS schema (" + "; ".join(details) + ")."
         )
 
-    validated = dataframe.loc[:, expected_columns].copy()
+    validated = dataframe.copy()
     missing_values = validated.isna().sum()
     missing_values = missing_values[missing_values > 0]
     if not missing_values.empty:
@@ -270,25 +384,33 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
             f"{column} ({count})"
             for column, count in missing_values.items()
         )
-        raise ValueError(f"The CSV contains missing values: {details}.")
+        missing_records = validated.loc[:, missing_values.index].isna().any(axis=1)
+        raise ValueError(
+            f"The CSV contains missing values: {details}. Invalid record numbers "
+            f"(1-based): {record_numbers(missing_records)}."
+        )
 
     invalid_values = []
+    invalid_records = pd.Series(False, index=validated.index)
     for column in expected_columns:
         converted = pd.to_numeric(validated[column], errors="coerce")
-        invalid_count = int((converted.isna() & validated[column].notna()).sum())
+        invalid_mask = converted.isna() & validated[column].notna()
+        invalid_count = int(invalid_mask.sum())
         if invalid_count:
             invalid_values.append(f"{column} ({invalid_count})")
+            invalid_records |= invalid_mask
         validated[column] = converted
 
     if invalid_values:
         raise ValueError(
             "All C-MAPSS columns must contain numeric values; invalid data in: "
             + ", ".join(invalid_values)
-            + "."
+            + f". Invalid record numbers (1-based): {record_numbers(invalid_records)}."
         )
 
     finite_values = np.isfinite(validated.to_numpy(dtype=float))
     if not finite_values.all():
+        invalid_records = ~finite_values.all(axis=1)
         invalid_columns = [
             column
             for column in expected_columns
@@ -297,14 +419,18 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             "The CSV contains non-finite numeric values in: "
             + ", ".join(invalid_columns)
+            + f". Invalid record numbers (1-based): {record_numbers(invalid_records)}."
             + "."
         )
 
     for column in ("engine_id", "cycle"):
         values = validated[column].to_numpy(dtype=float)
-        if ((values <= 0) | (values % 1 != 0)).any():
+        invalid_records = (values <= 0) | (values % 1 != 0)
+        if invalid_records.any():
             raise ValueError(
-                f"The {column} column must contain positive whole numbers."
+                f"The {column} column must contain positive whole numbers. "
+                f"Invalid record numbers (1-based): "
+                f"{record_numbers(invalid_records)}."
             )
 
     duplicate_cycles = validated.duplicated(
@@ -312,7 +438,8 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
     )
     if duplicate_cycles.any():
         raise ValueError(
-            "The CSV contains duplicate engine_id/cycle records."
+            "The CSV contains duplicate engine_id/cycle records at record "
+            f"numbers (1-based): {record_numbers(duplicate_cycles)}."
         )
 
     insufficient_history = []
@@ -331,13 +458,11 @@ def validate_uploaded_sensor_data(dataframe: pd.DataFrame) -> pd.DataFrame:
             + "."
         )
 
-    return validated.sort_values(
-        ["engine_id", "cycle"]
-    ).reset_index(drop=True)
+    return validated.reset_index(drop=True)
 
 
 def predict_uploaded_engines(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Engineer raw CSV rows and predict RUL at each engine's latest cycle."""
+    """Predict every raw CSV record and preserve its original input columns."""
 
     sensor_data = validate_uploaded_sensor_data(dataframe)
     feature_columns = load_feature_columns()
@@ -384,33 +509,20 @@ def predict_uploaded_engines(dataframe: pd.DataFrame) -> pd.DataFrame:
             + "."
         )
 
-    latest_rows = (
-        engineered.sort_values(["engine_id", "cycle"])
-        .groupby("engine_id", sort=True)
-        .tail(1)
+    predictions = np.asarray(
+        load_model().predict(engineered.loc[:, feature_columns]),
+        dtype=float,
     )
 
-    predictions = []
-    for _, row in latest_rows.iterrows():
-        features = {
-            column: float(row[column])
-            for column in feature_columns
-        }
-        predicted_rul = predict_rul(features)
-        if not math.isfinite(predicted_rul):
-            raise ValueError(
-                f"The model returned a non-finite RUL for engine "
-                f"{int(row['engine_id'])}."
-            )
-        predictions.append(
-            {
-                "engine_id": int(row["engine_id"]),
-                "cycle": int(row["cycle"]),
-                "predicted_rul": round(predicted_rul, 2),
-            }
-        )
+    if predictions.shape != (len(sensor_data),) or not np.isfinite(predictions).all():
+        raise ValueError("The model returned invalid RUL predictions.")
 
-    return pd.DataFrame(
-        predictions,
-        columns=["engine_id", "cycle", "predicted_rul"],
+    prediction_rows = engineered.loc[:, ["engine_id", "cycle"]].copy()
+    prediction_rows["predicted_rul"] = np.maximum(0.0, predictions)
+    return sensor_data.merge(
+        prediction_rows,
+        on=["engine_id", "cycle"],
+        how="left",
+        sort=False,
+        validate="one_to_one",
     )

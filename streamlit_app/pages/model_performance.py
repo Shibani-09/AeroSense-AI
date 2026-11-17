@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-from services.ml_service import load_feature_columns
+from streamlit_app.services.ml_service import load_feature_columns
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

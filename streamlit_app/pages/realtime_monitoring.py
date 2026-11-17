@@ -4,8 +4,8 @@ import re
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from pages.engine_prediction import classify_engine_health
-from services.ml_service import (
+from streamlit_app.pages.engine_prediction import classify_engine_health
+from streamlit_app.services.ml_service import (
     get_available_engines,
     load_feature_columns,
     load_test_dataset,

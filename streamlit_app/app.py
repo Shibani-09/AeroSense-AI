@@ -4,16 +4,25 @@ import pandas as pd
 import matplotlib as mpl
 from pathlib import Path
 
-from services.database import get_database
-from services.authentication import register_user, authenticate_user
-from services.ml_service import (
+from pymongo.errors import PyMongoError
+
+from streamlit_app.services.database import (
+    get_database,
+    get_prediction_history,
+    is_auth_enabled,
+    is_mongodb_configured,
+)
+from streamlit_app.services.authentication import register_user, authenticate_user
+from streamlit_app.services.ml_service import (
     load_feature_columns,
     load_model,
-    load_test_dataset,
+    load_existing_dataset,
+    list_existing_datasets,
+    predict_existing_dataset,
 )
-from pages.engine_prediction import show_engine_prediction
-from pages.model_performance import show_model_performance
-from pages.realtime_monitoring import show_realtime_monitoring
+from streamlit_app.pages.engine_prediction import show_engine_prediction
+from streamlit_app.pages.model_performance import show_model_performance
+from streamlit_app.pages.realtime_monitoring import show_realtime_monitoring
 
 
 # --------------------------------------------------
@@ -318,197 +327,174 @@ st.markdown("""
 
 
 # --------------------------------------------------
-# SESSION STATE
+# SESSION STATE AND CACHED DASHBOARD DATA
 # --------------------------------------------------
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
-
 if "user" not in st.session_state:
     st.session_state.user = None
+
+
+@st.cache_data(show_spinner=False)
+def _dashboard_prediction(dataset_name: str, modified_time: int) -> pd.DataFrame:
+    del modified_time
+    return predict_existing_dataset(load_existing_dataset(dataset_name))
+
+
+def _health_status(predicted_rul: float) -> str:
+    from streamlit_app.pages.engine_prediction import classify_engine_health
+
+    return classify_engine_health(float(predicted_rul))[0]
 
 
 # --------------------------------------------------
 # AUTHENTICATION PAGE
 # --------------------------------------------------
 
-def show_authentication():
+def show_authentication() -> None:
+    st.title("Predictive Maintenance")
+    st.caption("Industrial equipment health monitoring")
+    st.info("Sign in to access protected predictions and personal history.")
 
-    st.title("⚙️ Predictive Maintenance")
-    st.caption("Industrial Equipment Health Monitoring System")
-
-    st.divider()
-
-    login_tab, register_tab = st.tabs(
-        ["Login", "Create Account"]
-    )
-
-    # LOGIN
+    login_tab, register_tab = st.tabs(["Login", "Create account"])
     with login_tab:
-
-        st.subheader("Welcome Back")
-        st.write("Login to access your dashboard.")
-
         with st.form("login_form"):
-
-            email = st.text_input(
-                "Email Address",
-                placeholder="Enter your email"
+            email = st.text_input("Email address", autocomplete="email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button(
+                "Login", type="primary", use_container_width=True
             )
+        if submitted:
+            try:
+                success, message, user = authenticate_user(email, password)
+            except (OSError, PyMongoError, RuntimeError, ValueError) as error:
+                st.error(
+                    "Login could not be completed "
+                    f"({type(error).__name__}). Check MongoDB settings."
+                )
+            else:
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.user = user
+                    st.rerun()
+                st.error(message)
 
-            password = st.text_input(
-                "Password",
-                type="password",
-                placeholder="Enter your password"
-            )
-
-            login_button = st.form_submit_button(
-                "Login",
-                use_container_width=True
-            )
-
-            if login_button:
-
-                if not email.strip() or not password:
-                    st.error("Please enter email and password.")
-
-                else:
-                    try:
-                        success, message, user = authenticate_user(
-                            email,
-                            password
-                        )
-
-                        if success:
-                            st.session_state.authenticated = True
-                            st.session_state.user = user
-
-                            st.success(message)
-                            st.rerun()
-
-                        else:
-                            st.error(message)
-
-                    except Exception as error:
-                        st.error(
-                            f"Login failed. Please try again. {error}"
-                        )
-
-    # REGISTRATION
     with register_tab:
-
-        st.subheader("Create New Account")
-        st.write("Register to use the predictive maintenance system.")
-
         with st.form("registration_form"):
-
-            full_name = st.text_input(
-                "Full Name",
-                placeholder="Enter your full name"
-            )
-
-            email = st.text_input(
-                "Email Address",
-                placeholder="Enter your email"
-            )
-
+            full_name = st.text_input("Full name", max_chars=120)
+            email = st.text_input("Email address", autocomplete="email")
             password = st.text_input(
-                "Password",
-                type="password",
-                placeholder="Minimum 8 characters"
+                "Password", type="password", help="At least 8 characters."
             )
-
             confirm_password = st.text_input(
-                "Confirm Password",
-                type="password"
+                "Confirm password", type="password"
             )
-
-            register_button = st.form_submit_button(
-                "Create Account",
-                use_container_width=True
+            submitted = st.form_submit_button(
+                "Create account", type="primary", use_container_width=True
             )
-
-            if register_button:
-
-                if not full_name.strip() or not email.strip():
-                    st.error("Please complete all fields.")
-
-                elif not password or not confirm_password:
-                    st.error("Please enter and confirm your password.")
-
-                elif password != confirm_password:
-                    st.error("Passwords do not match.")
-
+        if submitted:
+            if password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    success, message = register_user(full_name, email, password)
+                except (OSError, PyMongoError, RuntimeError, ValueError) as error:
+                    st.error(
+                        "Registration could not be completed "
+                        f"({type(error).__name__}). Check MongoDB settings."
+                    )
                 else:
-                    try:
-                        success, message = register_user(
-                            full_name,
-                            email,
-                            password
-                        )
+                    if success:
+                        st.success(message)
+                        st.info("Your account is ready. You can now log in.")
+                    else:
+                        st.error(message)
 
-                        if success:
-                            st.success(message)
-                            st.info(
-                                "Your account is ready. "
-                                "Please login using your credentials."
-                            )
 
-                        else:
-                            st.error(message)
+def _show_sidebar() -> str:
+    st.sidebar.title("Predictive Maintenance")
+    st.sidebar.caption("Industrial equipment monitoring")
+    user = st.session_state.get("user")
+    if user:
+        st.sidebar.write(f"Welcome, {user['full_name']}")
+        st.sidebar.caption(user["email"])
+        if st.sidebar.button("Sign out", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.user = None
+            st.rerun()
 
-                    except Exception as error:
-                        st.error(
-                            f"Registration failed. Please try again. {error}"
-                        )
-
-    st.divider()
-
-    st.caption(
-        "Predictive Maintenance | Python • Streamlit • MongoDB"
-    )
+    pages = [
+        "Home Dashboard",
+        "Engine Prediction",
+        "Model Performance",
+        "Realtime Monitoring",
+    ]
+    if user:
+        pages.append("Prediction History")
+    return st.sidebar.radio("Navigation", pages)
 
 
 # --------------------------------------------------
-# AUTHENTICATED PAGES
+# PREDICTION HISTORY
 # --------------------------------------------------
 
-def show_authenticated_sidebar():
-    st.sidebar.title("⚙️ Predictive Maintenance")
-    st.sidebar.caption("Industrial Equipment Monitoring")
-    st.sidebar.divider()
+def show_prediction_history() -> None:
+    st.title("Prediction History")
+    user = st.session_state.get("user")
+    if not user:
+        st.error("Sign in to view prediction history.")
+        return
 
-    user = st.session_state.user
-    st.sidebar.write(
-        f"Welcome, {user['full_name']}"
-    )
+    try:
+        history = get_prediction_history(user["id"], limit=50)
+    except (OSError, PyMongoError, RuntimeError, ValueError) as error:
+        st.error(
+            "Prediction history is unavailable "
+            f"({type(error).__name__}). Check MongoDB settings."
+        )
+        return
 
-    st.sidebar.write(
-        user["email"]
-    )
+    if not history:
+        st.info("No predictions have been saved for this account yet.")
+        return
 
-    if st.sidebar.button(
-        "Logout",
-        use_container_width=True
-    ):
-        st.session_state.authenticated = False
-        st.session_state.user = None
-        st.rerun()
+    for item in history:
+        heading = (
+            f"{item['source_name']} · {item['prediction_timestamp']} "
+            f"(UTC)"
+        )
+        with st.expander(heading):
+            total_column, equipment_column, rul_column = st.columns(3)
+            total_column.metric("Processed records", item["record_count"])
+            equipment_column.metric("Equipment", item["equipment_count"])
+            rul_column.metric(
+                "Average latest RUL",
+                f"{item['average_predicted_rul']:.2f} cycles",
+            )
+            st.write("**Health distribution**", item["health_distribution"])
+            if item.get("report_csv") is not None:
+                st.download_button(
+                    "Download saved report",
+                    data=item["report_csv"].encode("utf-8-sig"),
+                    file_name=f"prediction-history-{item['id'][:8]}.csv",
+                    mime="text/csv",
+                    key=f"history_download_{item['id']}",
+                )
+            else:
+                st.caption(
+                    "The report exceeded the 256 KiB history-storage limit. "
+                    "Prediction metadata is retained; the original records "
+                    "were not stored."
+                )
 
 
-def show_dashboard():
-    show_authenticated_sidebar()
+# --------------------------------------------------
+# AUTHENTICATED AND PUBLIC APPLICATION PAGES
+# --------------------------------------------------
 
-    selected_page = st.sidebar.radio(
-        "Navigation",
-        [
-            "Home Dashboard",
-            "Engine Prediction",
-            "Model Performance",
-            "Realtime Monitoring",
-        ],
-    )
-
+def show_dashboard() -> None:
+    selected_page = _show_sidebar()
     if selected_page == "Engine Prediction":
         show_engine_prediction()
         return
@@ -518,173 +504,156 @@ def show_dashboard():
     if selected_page == "Realtime Monitoring":
         show_realtime_monitoring()
         return
+    if selected_page == "Prediction History":
+        show_prediction_history()
+        return
 
-    # Main heading
     st.title("Predictive Maintenance Dashboard")
-
     st.caption(
-        "Machine Learning Based Industrial Equipment "
-        "Health Monitoring and Remaining Useful Life Prediction"
+        "Actual Random Forest inference against the saved NASA C-MAPSS "
+        "FD001 test dataset."
     )
 
-    st.divider()
-
-    # Database connection
-    db = None
-    user_count = 0
-    database_status = "Disconnected"
-
-    try:
-        db = get_database()
-        user_count = db["users"].count_documents({})
-        database_status = "Connected"
-
-    except Exception as error:
-        st.error(f"MongoDB connection failed: {error}")
-
-    # Project resources
-    model_path = PROJECT_ROOT / "models" / "random_forest_rul_model.pkl"
-    feature_path = PROJECT_ROOT / "models" / "feature_columns.pkl"
-    train_path = PROJECT_ROOT / "data" / "processed" / "train_features.csv"
-    test_path = PROJECT_ROOT / "data" / "processed" / "test_features.csv"
-
-    model_status = "Available" if model_path.exists() else "Missing"
-    feature_count = 0
-    dataset_rows = 0
-    engine_count = 0
-    model_error = None
-    dataset_error = None
+    database_status = "Not configured"
+    database_name = None
+    if is_mongodb_configured():
+        try:
+            database = get_database()
+        except (OSError, PyMongoError, RuntimeError, ValueError) as error:
+            database_status = f"Unavailable ({type(error).__name__})"
+        else:
+            database_status = "Connected"
+            database_name = database.name
+    elif is_auth_enabled():
+        st.error("Authentication is enabled, but MongoDB is not configured.")
 
     try:
-        load_model()
+        datasets = list_existing_datasets()
+        test_dataset = next(
+            (name for name in datasets if "test" in name.lower()),
+            None,
+        )
+        if test_dataset is None:
+            raise FileNotFoundError("No processed test CSV was found under data/.")
+        dataset_path = PROJECT_ROOT / "data" / test_dataset
+        dashboard_results = _dashboard_prediction(
+            test_dataset, dataset_path.stat().st_mtime_ns
+        )
+        latest = (
+            dashboard_results.sort_values(["engine_id", "cycle"])
+            .groupby("engine_id", sort=True, as_index=False)
+            .tail(1)
+            .copy()
+        )
+        latest["health_status"] = latest["predicted_rul"].apply(_health_status)
+        latest["risk_category"] = latest["health_status"].map(
+            {
+                "Critical": "High",
+                "Warning": "Elevated",
+                "Monitor": "Moderate",
+                "Healthy": "Low",
+            }
+        )
         feature_count = len(load_feature_columns())
-    except Exception as error:
-        model_status = "Unavailable"
-        model_error = str(error)
+        load_model()
+    except (OSError, RuntimeError, ValueError) as error:
+        dashboard_results = None
+        latest = None
+        feature_count = 0
+        st.error(f"Dashboard model data is unavailable: {error}")
 
-    try:
-        test_dataset = load_test_dataset()
-        dataset_rows = len(test_dataset)
-        engine_count = test_dataset["engine_id"].nunique()
-    except Exception as error:
-        dataset_error = str(error)
+    record_count = len(dashboard_results) if dashboard_results is not None else None
+    equipment_count = latest["engine_id"].nunique() if latest is not None else None
+    average_rul = (
+        float(latest["predicted_rul"].mean()) if latest is not None else None
+    )
+    metric_columns = st.columns(4)
+    metric_columns[0].metric(
+        "Processed records",
+        f"{record_count:,}" if record_count is not None else "Unavailable",
+    )
+    metric_columns[1].metric(
+        "Equipment",
+        f"{equipment_count:,}" if equipment_count is not None else "Unavailable",
+    )
+    metric_columns[2].metric(
+        "Average latest RUL",
+        f"{average_rul:.2f} cycles" if average_rul is not None else "Unavailable",
+    )
+    metric_columns[3].metric("Model features", feature_count or "Unavailable")
+    st.caption(
+        f"MongoDB: {database_status}"
+        + (f" · Database: {database_name}" if database_name else "")
+    )
 
-    evaluation_metrics = {}
+    if latest is not None:
+        health_counts = latest["health_status"].value_counts().reindex(
+            ["Critical", "Warning", "Monitor", "Healthy"], fill_value=0
+        )
+        risk_counts = latest["risk_category"].value_counts().reindex(
+            ["High", "Elevated", "Moderate", "Low"], fill_value=0
+        )
+        health_column, risk_column = st.columns(2)
+        with health_column:
+            st.subheader("Equipment health")
+            st.bar_chart(health_counts, color="#1769E8")
+        with risk_column:
+            st.subheader("Equipment risk")
+            st.bar_chart(risk_counts, color="#E5A12B")
+
     metrics_path = PROJECT_ROOT / "outputs" / "final_model_metrics.csv"
-    if metrics_path.exists():
+    if metrics_path.is_file():
         try:
             metrics_df = pd.read_csv(metrics_path)
-            if {"Metric", "Value"}.issubset(metrics_df.columns):
-                evaluation_metrics = {
-                    str(row["Metric"]): float(row["Value"])
-                    for _, row in metrics_df.iterrows()
-                }
-        except (OSError, ValueError, TypeError) as error:
+            saved_metrics = {
+                str(row["Metric"]): float(row["Value"])
+                for _, row in metrics_df.iterrows()
+                if {"Metric", "Value"}.issubset(metrics_df.columns)
+            }
+        except (OSError, pd.errors.ParserError, TypeError, ValueError) as error:
             st.warning(f"Saved model metrics could not be read: {error}")
-
-    # Top metrics
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("Registered Users", user_count)
-
-    with col2:
-        st.metric("MongoDB Status", database_status)
-
-    with col3:
-        st.metric("ML Model", model_status)
-
-    with col4:
-        st.metric(
-            "Test Engines",
-            engine_count if not dataset_error else "Unavailable"
-        )
-
-    st.divider()
-
-    if model_error:
-        st.error(f"Random Forest model could not be loaded: {model_error}")
-    if dataset_error:
-        st.error(f"Processed test dataset could not be loaded: {dataset_error}")
-
-    # Project overview
-    st.subheader("System Overview")
-
-    left, right = st.columns(2)
-
-    with left:
-
-        st.markdown("### 🤖 Machine Learning")
-
-        st.write(
-            "The system uses a trained Random Forest model "
-            "to predict the Remaining Useful Life (RUL) "
-            "of industrial equipment."
-        )
-
-        st.write("**Model:** Existing Random Forest Regressor")
-        st.write("**Model features:**", feature_count or "Unavailable")
-        st.write("**Dataset:** NASA C-MAPSS FD001")
-        st.write("**Processed test records:**", dataset_rows or "Unavailable")
-
-    with right:
-
-        st.markdown("### 🗄️ Database")
-
-        st.write(
-            "MongoDB Atlas stores registered user accounts "
-            "and authentication information."
-        )
-
-        st.write(
-            f"**Database:** "
-            f"{db.name if db is not None else 'Unavailable'}"
-        )
-
-        st.write(
-            f"**User Collection:** {user_count} documents"
-        )
-
-    st.divider()
-
-    if evaluation_metrics:
-        st.subheader("Saved Model Performance")
-        metric_columns = st.columns(len(evaluation_metrics))
-        for column, (metric, value) in zip(
-            metric_columns, evaluation_metrics.items()
-        ):
-            column.metric(metric, f"{value:.3f}")
-
-        st.caption(
-            "Metrics are the saved evaluation results for the existing model; "
-            "the model was not retrained."
-        )
-
-    st.divider()
-
-    # Project resources
-    st.subheader("Project Resources")
-
-    resources = {
-        "Random Forest Model": model_path,
-        "Feature Columns": feature_path,
-        "Training Dataset": train_path,
-        "Testing Dataset": test_path
-    }
-
-    for resource, path in resources.items():
-
-        if path.exists():
-            st.success(f"{resource}: Available")
-
         else:
-            st.warning(f"{resource}: Not found")
+            if saved_metrics:
+                st.subheader("Saved validation metrics")
+                columns = st.columns(len(saved_metrics))
+                for column, (name, value) in zip(columns, saved_metrics.items()):
+                    column.metric(name, f"{value:.3f}")
+                st.caption(
+                    "These are saved validation results for the existing model; "
+                    "the model is not retrained on app startup."
+                )
 
-    st.divider()
+    user = st.session_state.get("user")
+    if user and database_status == "Connected":
+        try:
+            history = get_prediction_history(
+                user["id"], limit=10, include_reports=False
+            )
+        except (OSError, PyMongoError, RuntimeError, ValueError) as error:
+            st.warning(
+                "Personal prediction trends are unavailable "
+                f"({type(error).__name__})."
+            )
+        else:
+            if len(history) > 1:
+                history_frame = pd.DataFrame(history)
+                history_frame["prediction_timestamp"] = pd.to_datetime(
+                    history_frame["prediction_timestamp"], utc=True, errors="coerce"
+                )
+                history_frame = history_frame.dropna(
+                    subset=["prediction_timestamp"]
+                ).sort_values("prediction_timestamp")
+                if not history_frame.empty:
+                    st.subheader("Your prediction trend")
+                    st.line_chart(
+                        history_frame.set_index("prediction_timestamp")[
+                            "average_predicted_rul"
+                        ]
+                    )
 
     st.caption(
-        "Predictive Maintenance System | "
-        "Python • Streamlit • MongoDB • Machine Learning"
+        "The monitoring page replays historical dataset rows. No live sensors "
+        "or continuous streaming source are connected."
     )
 
 
@@ -692,14 +661,29 @@ def show_dashboard():
 # APPLICATION ENTRY POINT
 # --------------------------------------------------
 
-if st.session_state.authenticated:
+auth_enabled = is_auth_enabled()
+if auth_enabled and not is_mongodb_configured():
+    st.error(
+        "AUTH_ENABLED is true but MongoDB is not configured. Set MONGODB_URI "
+        "and MONGODB_DATABASE before enabling login."
+    )
+    st.stop()
+
+if auth_enabled and not (
+    st.session_state.authenticated and st.session_state.user
+):
+    st.session_state.authenticated = False
+    st.session_state.user = None
     page = st.navigation(
-        [st.Page(show_dashboard, title="Predictive Maintenance", default=True)],
+        [st.Page(show_authentication, title="Login", default=True)],
         position="hidden",
     )
 else:
+    if not auth_enabled:
+        st.session_state.authenticated = False
+        st.session_state.user = None
     page = st.navigation(
-        [st.Page(show_authentication, title="Login", default=True)],
+        [st.Page(show_dashboard, title="Predictive Maintenance", default=True)],
         position="hidden",
     )
 
